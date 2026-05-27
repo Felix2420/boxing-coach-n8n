@@ -1,0 +1,1050 @@
+{
+  "name": "BoxCoach AI — v8.2 Serie Corregida",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "54ec0a33-e9c4-4eee-96c0-f1d38b507266",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        10656,
+        5168
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://www.strava.com/api/v3/athlete/activities?per_page=100&page=1",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "stravaOAuth2Api",
+        "options": {}
+      },
+      "id": "2aa19ec2-742d-47de-bcd7-ba05007a932e",
+      "name": "GET Actividades Strava",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        10880,
+        5168
+      ],
+      "credentials": {
+        "stravaOAuth2Api": {
+          "id": "YOUR_STRAVA_CREDENTIAL_ID",
+          "name": "strava_oauth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// IMPORTAR HISTORIAL STRAVA → PostgreSQL\n// Procesa hasta 100 actividades tipo Run\n// ============================================================\nconst actividades = $input.all().map(i => i.json);\n\nconst runs = actividades.filter(a => a.type === 'Run');\n\nif (runs.length === 0) {\n  return [{ json: { query: 'SELECT 1', total: 0, message: 'No hay actividades tipo Run en esta página' } }];\n}\n\nconst inserts = runs.map(a => {\n  const durationMin = (a.moving_time || 0) / 60;\n  const distanceKm = (a.distance || 0) / 1000;\n  const paceSecKm = distanceKm > 0 ? (a.moving_time / distanceKm) : 0;\n  const paceMin = Math.floor(paceSecKm / 60);\n  const paceSec = Math.round(paceSecKm % 60);\n  const pace = `${paceMin}:${String(paceSec).padStart(2,'0')} min/km`;\n  const avgHR = a.average_heartrate || 0;\n  const maxHR = a.max_heartrate || 0;\n  const hrMax = [FC_MAX];\n  const hrRest = [FC_REPOSO];\n  const hrRatio = avgHR > 0 ? Math.max(0, Math.min(1.2, (avgHR - hrRest) / (hrMax - hrRest))) : 0;\n  const trimp = avgHR > 0\n    ? Math.round(durationMin * hrRatio * 0.64 * Math.exp(1.92 * hrRatio))\n    : Math.round(durationMin * 1.1);\n  const intensityPct = avgHR > 0 ? Math.round((avgHR / hrMax) * 100) : 0;\n  let zone = 'Sin FC';\n  if (intensityPct > 0 && intensityPct < 70) zone = 'Z2 aeróbico';\n  else if (intensityPct < 80) zone = 'Z3 umbral aeróbico';\n  else if (intensityPct < 90) zone = 'Z4 umbral anaeróbico';\n  else if (intensityPct >= 90) zone = 'Z5 VO2/anaeróbico';\n  const lapsCount = a.laps_count || 0;\n  const roundLike = lapsCount >= 5;\n  let sessionType = 'aeróbico';\n  if (intensityPct >= 90) sessionType = 'anaeróbico';\n  else if (roundLike && intensityPct >= 82) sessionType = 'específico de combate';\n  const nombre = (a.name || 'Run').replace(/'/g, \"''\");\n  const fecha = a.start_date_local || a.start_date;\n  const elevacion = a.total_elevation_gain || 0;\n\n  return `(${a.id}, '${fecha}', '${nombre}', ${distanceKm.toFixed(2)}, ${durationMin.toFixed(1)}, '${pace}', ${Math.round(paceSecKm)}, ${avgHR}, ${maxHR}, ${trimp}, ${intensityPct}, '${zone}', 0, ${roundLike}, '${sessionType}', ${elevacion})`;\n});\n\nconst query = `INSERT INTO boxing_sessions\n(activity_id, fecha, nombre, distancia_km, duracion_min, pace, pace_sec_km, fc_media, fc_max, trimp, intensidad_pct, zona, variabilidad, round_like, session_type, elevacion)\nVALUES ${inserts.join(',\\n')}\nON CONFLICT (activity_id) DO NOTHING`;\n\nreturn [{ json: { query, total: runs.length, totalActividades: actividades.length } }];"
+      },
+      "id": "e7ca9014-b7ec-4d93-b58f-c309608f7835",
+      "name": "Calcular Métricas Import",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11104,
+        5168
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.query }}",
+        "options": {}
+      },
+      "id": "c7eeb420-fc1a-4087-91fe-6aeba3861c72",
+      "name": "PG — Insertar Sesiones",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11328,
+        5168
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as total_importadas, MIN(fecha) as primera_fecha, MAX(fecha) as ultima_fecha FROM boxing_sessions",
+        "options": {}
+      },
+      "id": "95ba3126-9dfc-4ca2-b1c2-93cb4ac5e434",
+      "name": "PG — Verificar Total",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11760,
+        5168
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const resultado = $input.first().json;\nconst total = resultado.total_importadas || 0;\nconst primera = resultado.primera_fecha ? new Date(resultado.primera_fecha).toLocaleDateString('es-MX') : 'N/D';\nconst ultima = resultado.ultima_fecha ? new Date(resultado.ultima_fecha).toLocaleDateString('es-MX') : 'N/D';\n\nconst mensaje = `✅ Importación completada\n\n📊 Total sesiones en DB: ${total}\n📅 Primera sesión: ${primera}\n📅 Última sesión: ${ultima}\n\n${total < 100 ? 'Todas las sesiones importadas.' : '⚠️ Tienes más de 100 sesiones. Cambia page=1 a page=2 en el nodo GET y vuelve a ejecutar.'}`;\n\nreturn [{ json: { mensaje, total } }];"
+      },
+      "id": "929e7f35-9d53-40eb-9ab0-fed119555d6e",
+      "name": "Resumen Importación",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11984,
+        5168
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE boxing_records SET\n  best_pace_sec = (SELECT MIN(pace_sec_km) FROM boxing_sessions WHERE pace_sec_km > 0),\n  max_trimp = (SELECT MAX(trimp) FROM boxing_sessions),\n  max_intensidad = (SELECT MAX(intensidad_pct) FROM boxing_sessions),\n  updated_at = NOW()\nWHERE id = 1",
+        "options": {}
+      },
+      "id": "bc58fafb-0e41-4e00-a36d-f15a9f3a6915",
+      "name": "PG — Actualizar Récords1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11536,
+        5168
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 22 * * 0"
+            }
+          ]
+        }
+      },
+      "id": "3d6c5855-1758-4bb0-bf8c-e27af2b0c81d",
+      "name": "Cron Resumen Semanal",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        10800,
+        4928
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT s.fecha, s.distancia_km, s.pace, s.pace_sec_km, s.fc_media, s.trimp, s.intensidad_pct, s.zona, s.round_like, s.session_type FROM boxing_sessions s ORDER BY s.fecha DESC LIMIT 90",
+        "options": {}
+      },
+      "id": "e4a36c00-0691-4052-94cd-9bc0b92a5312",
+      "name": "PG — Leer Historial Completo",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11024,
+        4928
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// PREPARAR DATOS PARA QUE CLAUDE GENERE EL PLAN\n// ============================================================\nconst rows = $input.all().map(r => r.json);\nconst now = new Date();\nconst weekMs = 7 * 24 * 60 * 60 * 1000;\n\nconst semanas = [0,1,2,3,4].map(w => ({\n  sesiones: rows.filter(s => {\n    const d = now - new Date(s.fecha);\n    return d >= w * weekMs && d < (w+1) * weekMs;\n  })\n}));\n\nconst semActual  = semanas[0].sesiones;\nconst semAnterior = semanas[1].sesiones;\nconst sem3 = semanas[2].sesiones;\nconst sem4 = semanas[3].sesiones;\n\nconst metricas = (ses) => ({\n  load:     ses.reduce((a,s) => a + (parseInt(s.trimp)||0), 0),\n  km:       Number(ses.reduce((a,s) => a + (parseFloat(s.distancia_km)||0), 0).toFixed(1)),\n  sessions: ses.length,\n  hiit:     ses.filter(s => (parseInt(s.intensidad_pct)||0) >= 85).length,\n  rounds:   ses.filter(s => s.round_like).length,\n  avgPace:  ses.length ? Math.round(ses.reduce((a,s) => a + (parseInt(s.pace_sec_km)||0), 0) / ses.length) : 0,\n  avgHR:    ses.filter(s => s.fc_media > 0).length\n              ? Math.round(ses.filter(s => s.fc_media > 0).reduce((a,s) => a + s.fc_media, 0) / ses.filter(s => s.fc_media > 0).length)\n              : 0\n});\n\nconst mA = metricas(semActual);\nconst mP = metricas(semAnterior);\nconst m3 = metricas(sem3);\nconst m4 = metricas(sem4);\n\nconst tendLoad = mA.load > mP.load ? 'SUBIENDO' : mA.load < mP.load ? 'BAJANDO' : 'ESTABLE';\nconst tendPace = mA.avgPace > 0 && mP.avgPace > 0\n  ? (mA.avgPace < mP.avgPace ? 'MEJORANDO' : 'BAJANDO')\n  : 'SIN DATOS';\n\nconst fmtPace = (sec) => sec ? `${Math.floor(sec/60)}:${String(Math.round(sec%60)).padStart(2,'0')} min/km` : 'N/D';\n\n// Récords históricos\nconst bestPaceSec = rows.filter(s => s.pace_sec_km > 0).reduce((best, s) => (!best || s.pace_sec_km < best) ? s.pace_sec_km : best, null);\nconst maxTrimp    = rows.reduce((b,s) => s.trimp > b ? s.trimp : b, 0);\n\n// Historial 4 semanas para que Claude vea tendencia\nconst hist4 = [mA, mP, m3, m4].map((m, i) => `  Semana -${i}: ${m.sessions} ses | ${m.km}km | TRIMP:${m.load} | HIIT:${m.hiit} | Rounds:${m.rounds} | Pace:${fmtPace(m.avgPace)}`);\n\n// Prompt para que Claude genere el plan\nconst promptPlan = `Eres COACH RAMOS. Entrenador de boxeo con 15 años de experiencia.\nGenera el plan de entrenamiento de running para la semana siguiente.\n\nBASE CIENTÍFICA OBLIGATORIA — usa estos autores:\n- Eric Banister: modelo TRIMP para cuantificar carga\n- Tudor Bompa: periodización ondulante (carga/descarga semanal)\n- Vladimir Issurin: periodización en bloques\n- Martin Buchheit: HIIT, intervalos 3:1 para sistema glucolítico\n- Joel Jamieson: energía específica para deportes de combate\n- Ross Enamait: acondicionamiento específico de boxeo\n- Yuri Verkhoshansky: sprints y potencia fosfágena\n- Arthur Lydiard: base aeróbica antes de intensidad\n- Jack Daniels: zonas de FC y VO2max\n\nATLETA:\n- [EDAD] años | [ESTATURA]cm | [DEPORTE] activo\n- Running 3x/semana como herramienta, NO como fin\n- FC máx: [FC_MAX]bpm | FC reposo: [FC_REPOSO]bpm\n- Objetivo: más rounds, más explosividad, mejor recuperación\n\nDATO DE LAS ÚLTIMAS 4 SEMANAS:\n${hist4.join('\\n')}\n\nTENDENCIAS:\n- Carga: ${tendLoad}\n- Pace: ${tendPace}\n- Récord pace histórico: ${fmtPace(bestPaceSec)}\n- Mayor TRIMP registrado: ${maxTrimp}\n\nGENERA exactamente 3 sesiones de running para la semana.\nResponde ÚNICAMENTE con un JSON válido, sin texto adicional, sin bloques de código, sin explicaciones:\n[\n  {\n    \"dia\": \"Lunes\",\n    \"tipo\": \"nombre corto del tipo de sesión\",\n    \"descripcion\": \"descripción detallada con números exactos: distancia o tiempo, %FC o bpm objetivo, series x tiempo. Menciona brevemente el autor científico que respalda esta sesión.\",\n    \"completado\": false,\n    \"trimp_esperado\": número entero\n  },\n  { ... sesión miércoles ... },\n  { ... sesión viernes ... }\n]`;\n\nconst semanaStr = `${now.getFullYear()}-W${Math.ceil((now.getDate() - now.getDay() + 1) / 7)}`;\n// Construir body listo para Claude\nconst bodyParaClaude = JSON.stringify({\n  model: \"claude-haiku-4-5-20251001\",\n  max_tokens: 800,\n  messages: [{ role: \"user\", content: promptPlan }]\n});\n\nreturn [{ json: {\n  promptPlan,\n  bodyParaClaude,\n  mA, mP, tendLoad, tendPace,\n  bestPaceSec, maxTrimp,\n  semanaStr,\n  totalSesiones: rows.length,\n  now: now.toISOString()\n} }];"
+      },
+      "id": "a71518fd-2e41-47d1-84f6-f9ed80c23203",
+      "name": "Preparar Datos Resumen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11248,
+        4928
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.bodyParaClaude }}",
+        "options": {}
+      },
+      "id": "7aaf99e3-bd8c-4edd-a7c0-ca590b22bd11",
+      "name": "Claude — Generar Plan Semanal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        11472,
+        4928
+      ],
+      "credentials": {
+        "anthropicApi": {
+          "id": "YOUR_ANTHROPIC_CREDENTIAL_ID",
+          "name": "Anthropic account"
+        },
+        "httpHeaderAuth": {
+          "id": "YOUR_SHEETS_CREDENTIAL_ID",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// PROCESAR RESPUESTA DE CLAUDE + CONSTRUIR MENSAJE SEMANAL\n// ============================================================\nconst claudeResp = $input.first().json;\nconst datosResumen = $('Preparar Datos Resumen').first().json;\n\nconst { mA, mP, tendLoad, tendPace, totalSesiones, semanaStr, now: nowStr } = datosResumen;\nconst now = new Date(nowStr);\n\n// Extraer texto de Claude\nlet planTextoRaw = '';\nif (claudeResp.content && claudeResp.content[0]) {\n  planTextoRaw = claudeResp.content[0].text || '';\n}\n\n// Parsear JSON del plan\nlet planSesiones = [];\ntry {\n  // Limpiar por si Claude agregó algo extra\n  const jsonMatch = planTextoRaw.match(/\\[.*\\]/s);\n  if (jsonMatch) {\n    planSesiones = JSON.parse(jsonMatch[0]);\n  } else {\n    planSesiones = JSON.parse(planTextoRaw);\n  }\n} catch(e) {\n  // Si Claude no devolvió JSON válido, plan de respaldo\n  planSesiones = [\n    { dia: 'Lunes', tipo: 'Base aeróbica', descripcion: '30min Z3. Pace 5:30 min/km. Lydiard: base aeróbica primero.', completado: false, trimp_esperado: 50 },\n    { dia: 'Miércoles', tipo: 'Rounds simulados', descripcion: '8x(3min 85-90%FC / 1min trote). Buchheit: sistema glucolítico láctico.', completado: false, trimp_esperado: 85 },\n    { dia: 'Viernes', tipo: 'Sprints', descripcion: '6x20seg sprint máximo + 90seg recuperación. Verkhoshansky: potencia ATP-PC.', completado: false, trimp_esperado: 40 }\n  ];\n}\n\n// Asegurar que todas tienen completado: false\nplanSesiones = planSesiones.map(s => ({ ...s, completado: false }));\n\n// Tendencias con emojis\nconst tendLoadEmoji = tendLoad === 'SUBIENDO' ? '📈' : tendLoad === 'BAJANDO' ? '📉' : '➡️';\nconst tendPaceEmoji = tendPace === 'MEJORANDO' ? '📈' : tendPace === 'BAJANDO' ? '📉' : '➡️';\n\nconst fmtPace = (sec) => sec ? `${Math.floor(sec/60)}:${String(Math.round(sec%60)).padStart(2,'0')} min/km` : 'N/D';\nconst avgPaceStr = fmtPace(mA.avgPace);\nconst comparacion = mP.load > 0\n  ? `Esta semana vs anterior: ${mA.load > mP.load ? '+' : ''}${mA.load - mP.load} TRIMP (${mA.load} vs ${mP.load})`\n  : 'Primera semana con datos suficientes.';\n\nlet nutricion = '';\nif (mA.load > 200) nutricion = '🍚 Carga alta → prioriza carbohidratos los días de descanso.';\nelse if (mA.hiit >= 2) nutricion = '🥩 Sesiones intensas → 20-30g proteína en la hora post-entreno.';\nelse nutricion = '💧 Semana moderada → hidratación y sueño son tu prioridad.';\n\nconst planTexto = planSesiones.map((s, i) =>\n  `${i+1}. *${s.dia} — ${s.tipo}*\\n   ${s.descripcion}`\n).join('\\n\\n');\n\nconst text = `🥊 *COACH RAMOS — RESUMEN SEMANAL*\n📅 Domingo ${now.toLocaleDateString('es-MX')}\n\n📊 *Semana completada:*\n• Sesiones: ${mA.sessions} | Km: ${mA.km}\n• Carga TRIMP: ${mA.load} | Pace medio: ${avgPaceStr}\n• Sesiones intensas: ${mA.hiit} | Rounds: ${mA.rounds}\n• Carga: ${tendLoadEmoji} ${tendLoad} | Pace: ${tendPaceEmoji} ${tendPace}\n• ${comparacion}\n\n📅 *Plan semana nueva (generado por IA):*\n${planTexto}\n\n${nutricion}\n\n_📦 ${totalSesiones} sesiones en memoria permanente. 🥊_`;\n\nreturn [{ json: { text, planSesiones, semanaStr } }];"
+      },
+      "id": "d92ea576-6814-4f21-be3c-ee837aaded4d",
+      "name": "Procesar Plan Claude",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11680,
+        4928
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ `INSERT INTO boxing_plan (generado_el, semana, sesion_actual, completado, sesiones) VALUES (NOW(), '${$json.semanaStr}', 0, false, '${JSON.stringify($json.planSesiones).replace(/'/g, \"''\")}')` }}",
+        "options": {}
+      },
+      "id": "ccf2c981-c716-47aa-aec3-e74941b55780",
+      "name": "PG — Guardar Plan IA",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11904,
+        4928
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $('Procesar Plan Claude').first().json.text }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "591583ee-2cd8-4b2c-b4b2-66e59003135f",
+      "name": "Telegram Resumen Semanal",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        12128,
+        4928
+      ],
+      "webhookId": "your-webhook-id-1",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5-20250929",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {
+          "maxTokensToSample": 400,
+          "thinking": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        11792,
+        4224
+      ],
+      "id": "2a4e69bc-7707-47f8-85c2-302254a183fc",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "YOUR_ANTHROPIC_CREDENTIAL_ID",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM boxing_records WHERE id = 1",
+        "options": {}
+      },
+      "id": "f3a4eb36-ede2-4f5a-97df-2dba9e4ccf60",
+      "name": "PG — Leer Récords",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11232,
+        4256
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "object": "activity",
+        "event": "create",
+        "options": {}
+      },
+      "id": "074ee505-3416-40d3-aa6e-069d23563fa5",
+      "name": "Strava Trigger",
+      "type": "n8n-nodes-base.stravaTrigger",
+      "typeVersion": 1,
+      "position": [
+        10800,
+        4432
+      ],
+      "webhookId": "your-webhook-id-2",
+      "credentials": {
+        "stravaOAuth2Api": {
+          "id": "YOUR_STRAVA_CREDENTIAL_ID",
+          "name": "strava_oauth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://www.strava.com/api/v3/activities/{{$json.object_id}}?include_all_efforts=true",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "stravaOAuth2Api",
+        "options": {}
+      },
+      "id": "759edb39-9130-48ff-ab5b-e04fb2e1a91c",
+      "name": "GET Activity Detail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        11232,
+        4432
+      ],
+      "credentials": {
+        "stravaOAuth2Api": {
+          "id": "YOUR_STRAVA_CREDENTIAL_ID",
+          "name": "strava_oauth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const a = $input.first().json;\nconst data = a.body || a;\nconst athlete = { hrMax: [FC_MAX], hrRest: [FC_REPOSO] };\nconst durationSec = Number(data.moving_time || 0);\nconst durationMin = durationSec / 60;\nconst distanceKm = Number((data.distance || 0) / 1000);\nconst avgHR = Number(data.average_heartrate || 0);\nconst maxHR = Number(data.max_heartrate || avgHR || 0);\nconst elevation = Number(data.total_elevation_gain || 0);\nconst paceSecKm = distanceKm > 0 ? durationSec / distanceKm : 0;\nconst pace = `${Math.floor(paceSecKm/60)}:${String(Math.round(paceSecKm%60)).padStart(2,'0')} min/km`;\nconst hrRatio = avgHR > 0 ? Math.max(0, Math.min(1.2, (avgHR - athlete.hrRest) / (athlete.hrMax - athlete.hrRest))) : 0;\nconst trimp = avgHR > 0 ? Math.round(durationMin * hrRatio * 0.64 * Math.exp(1.92 * hrRatio)) : Math.round(durationMin * 1.1);\nconst intensityPct = avgHR > 0 ? Math.round((avgHR / athlete.hrMax) * 100) : 0;\nlet zone = 'Sin FC';\nif (intensityPct > 0 && intensityPct < 70) zone = 'Z2 aeróbico';\nelse if (intensityPct < 80) zone = 'Z3 umbral aeróbico';\nelse if (intensityPct < 90) zone = 'Z4 umbral anaeróbico';\nelse if (intensityPct >= 90) zone = 'Z5 VO2/anaeróbico';\nconst splits = Array.isArray(data.splits_metric) ? data.splits_metric : [];\nconst splitPaces = splits.filter(s => s.distance && s.moving_time).map(s => s.moving_time / (s.distance / 1000));\nlet variability = 0;\nif (splitPaces.length > 1) { const avg = splitPaces.reduce((x,y)=>x+y,0)/splitPaces.length; const variance = splitPaces.reduce((acc,p)=>acc+Math.pow(p-avg,2),0)/splitPaces.length; variability = Math.round(Math.sqrt(variance)); }\nconst laps = Array.isArray(data.laps) ? data.laps.length : 0;\nconst roundLike = laps >= 5 || variability >= 25;\nlet sessionType = 'aeróbico';\nif (intensityPct >= 90 || (variability > 35 && durationMin < 35)) sessionType = 'anaeróbico';\nelse if (roundLike && intensityPct >= 82) sessionType = 'específico de combate';\nreturn [{ json: { activityId: data.id || Date.now(), fecha: data.start_date_local || new Date().toISOString(), nombre: data.name || 'Run', distanciaKm: Number(distanceKm.toFixed(2)), duracionMin: Number(durationMin.toFixed(1)), pace, paceSecKm: Math.round(paceSecKm), fcMedia: avgHR, fcMax: maxHR, trimp, intensidadPct: intensityPct, zona: zone, variabilidad: variability, roundLike, sessionType, elevacion: elevation } }];"
+      },
+      "id": "c09b1b99-7572-4c81-9760-2f56d2a58e16",
+      "name": "Calcular Métricas Boxeo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11456,
+        4432
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ `INSERT INTO boxing_sessions (activity_id, fecha, nombre, distancia_km, duracion_min, pace, pace_sec_km, fc_media, fc_max, trimp, intensidad_pct, zona, variabilidad, round_like, session_type, elevacion) VALUES (${$json.activityId}, '${$json.fecha}', '${($json.nombre||'Run').replace(/'/g,\"''\")}', ${$json.distanciaKm}, ${$json.duracionMin}, '${$json.pace}', ${$json.paceSecKm}, ${$json.fcMedia}, ${$json.fcMax}, ${$json.trimp}, ${$json.intensidadPct}, '${$json.zona}', ${$json.variabilidad}, ${$json.roundLike}, '${$json.sessionType}', ${$json.elevacion}) ON CONFLICT (activity_id) DO NOTHING` }}",
+        "options": {}
+      },
+      "id": "1a712739-daf2-454e-8516-f02c6b37a444",
+      "name": "PG — Guardar Sesión",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11680,
+        4352
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ `UPDATE boxing_records SET best_pace_sec = LEAST(COALESCE(best_pace_sec, 99999), ${$('Calcular Métricas Boxeo').first().json.paceSecKm > 0 ? $('Calcular Métricas Boxeo').first().json.paceSecKm : 99999}), max_trimp = GREATEST(COALESCE(max_trimp, 0), ${$('Calcular Métricas Boxeo').first().json.trimp}), max_intensidad = GREATEST(COALESCE(max_intensidad, 0), ${$('Calcular Métricas Boxeo').first().json.intensidadPct}), updated_at = NOW() WHERE id = 1` }}",
+        "options": {}
+      },
+      "id": "8c717427-08e2-4c90-8033-79403058fbab",
+      "name": "PG — Actualizar Récords",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11680,
+        4496
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM boxing_plan ORDER BY created_at DESC LIMIT 1",
+        "options": {}
+      },
+      "id": "50aa64fa-bcdd-455f-aea1-7264946d714b",
+      "name": "PG — Leer Plan Post-Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11680,
+        4640
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const a = $('Calcular Métricas Boxeo').first().json;\n\n// Si la actividad no tenia datos de distancia, no procesar\nif (a.error || a.distanciaKm === 0) {\n  return [{ json: {\n    autoMessage: '⚠️ *COACH RAMOS*\\n\\nTu actividad llegó sin datos completos.\\nEspera unos minutos y vuelve a sincronizar en Strava.',\n    planActualizado: null\n  }}];\n}\n\nlet planRow = null;\ntry {\n  const planData = $('PG — Leer Plan Post-Run').first()?.json;\n  if (planData && planData.sesiones) planRow = planData;\n} catch(e) { planRow = null; }\n\nlet planInfo = '';\nlet planActualizado = null;\n\nif (planRow && planRow.sesiones) {\n  let sesiones = planRow.sesiones;\n  if (typeof sesiones === 'string') sesiones = JSON.parse(sesiones);\n  const sesionActual = parseInt(planRow.sesion_actual) || 0;\n  const pendiente = sesiones.findIndex((s, i) => i >= sesionActual && !s.completado);\n  if (pendiente !== -1) {\n    sesiones[pendiente].completado = true;\n    sesiones[pendiente].trimpReal = a.trimp;\n    sesiones[pendiente].fechaCompletado = a.fecha;\n    const nuevaSesionActual = pendiente + 1;\n    const planCompletado = sesiones.every(s => s.completado);\n    const siguiente = sesiones.find((s, i) => i >= nuevaSesionActual && !s.completado);\n    const completadas = sesiones.filter(s => s.completado).length;\n    planActualizado = { id: planRow.id, sesiones, sesionActual: nuevaSesionActual, completado: planCompletado };\n    if (planCompletado) {\n      planInfo = `\\n\\n🏆 *Plan semanal COMPLETADO* (${completadas}/${sesiones.length})\\nEl domingo Claude genera el nuevo plan. 💪`;\n    } else if (siguiente) {\n      planInfo = `\\n\\n📋 *Plan: ${completadas}/${sesiones.length} sesiones*\\n▶️ *Siguiente:*\\n*${siguiente.dia} — ${siguiente.tipo}*\\n_${siguiente.descripcion}_`;\n    }\n  }\n}\n\n// Sistema energético\nconst sistemaTexto = a.sessionType === 'anaeróbico' ? '🔴 Anaeróbico' \n  : a.sessionType === 'específico de combate' ? '🥊 Combate' \n  : '🟢 Aeróbico';\n\n// FC y zona — manejar cuando no hay sensor\nconst fcTexto = a.fcMedia > 0 ? `${a.fcMedia} bpm` : 'Sin sensor FC';\nconst zonaTexto = a.fcMedia > 0 ? a.zona : 'Estimada por tiempo';\nconst trimpTexto = a.fcMedia > 0 ? `${a.trimp}` : `${a.trimp} (estimado)`;\n\n// Pace — manejar cuando es 0\nconst paceTexto = a.paceSecKm > 0 && a.paceSecKm < 600 ? a.pace : 'N/D';\n\n// Alertas\nconst alertas = [];\nif (a.distanciaKm > 12) alertas.push('⚠️ Volumen alto — adaptaciones de fondista');\nif (a.fcMedia > 0 && a.intensidadPct < 70 && a.duracionMin > 30) alertas.push('⚠️ Muy suave y largo — sube intensidad la próxima');\n\n// Nutrición\nlet nutricion = '';\nif (a.trimp > 80) nutricion = '\\n🍚 Sesión intensa → carbos en las próximas 2h.';\nelse if (a.sessionType === 'anaeróbico') nutricion = '\\n🥩 Anaeróbico → 20-30g proteína en la hora siguiente.';\n\nconst autoMessage = `🥊 *COACH RAMOS — Sesión analizada*\n\n📍 *${a.nombre}*\n- ${a.distanciaKm}km en ${a.duracionMin}min\n- Pace: ${paceTexto} | FC: ${fcTexto}\n- Zona: ${zonaTexto}\n- ${sistemaTexto} | TRIMP: ${trimpTexto}\n\n${alertas.length > 0 ? '🚨 ' + alertas.join('\\n') + '\\n\\n' : ''}${nutricion}${planInfo}`;\n\nreturn [{ json: { autoMessage, planActualizado } }];"
+      },
+      "id": "a51a0905-4cfd-4568-ab9a-3a68fae918fd",
+      "name": "Coach Feedback Post-Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11888,
+        4528
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.planActualizado ? `UPDATE boxing_plan SET sesiones = '${JSON.stringify($json.planActualizado.sesiones).replace(/'/g,\"''\")}', sesion_actual = ${$json.planActualizado.sesionActual}, completado = ${$json.planActualizado.completado} WHERE id = ${$json.planActualizado.id}` : 'SELECT 1' }}",
+        "options": {}
+      },
+      "id": "11e275ac-bd01-4e40-b61e-93a95642554b",
+      "name": "PG — Actualizar Plan",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        12112,
+        4640
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $('Coach Feedback Post-Run').first().json.autoMessage }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "cf13caea-b805-47c1-b679-00d32bc953b4",
+      "name": "Telegram Post-Actividad",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        12112,
+        4432
+      ],
+      "webhookId": "your-webhook-id-3",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $json.mensaje }}",
+        "additionalFields": {}
+      },
+      "id": "4620fc36-d7ee-48ee-a032-7b96e12124cd",
+      "name": "Telegram — Confirmar Importación1",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        12208,
+        5168
+      ],
+      "webhookId": "your-webhook-id-4",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "messages": {
+          "messageValues": [
+            {
+              "message": "Eres COACH RAMOS. Entrenador de boxeo con 15 años en el ring. Directo, exigente, sin rodeos.\n\nATLETA: [EDAD] años, [ESTATURA]cm, [DEPORTE] activo. Running 3x/semana. NO fondista.\nOBJETIVO: más rounds, más explosividad, mejor recuperación. FC máx: [FC_MAX]bpm.\n\nBASE CIENTÍFICA:\n- Banister: modelo TRIMP para carga\n- Bompa: periodización ondulante\n- Buchheit: HIIT 3:1 para glucolítico láctico\n- Enamait: acondicionamiento de boxeo\n- Jamieson: energía para combate\n- Verkhoshansky: sprints y potencia fosfágena\n- Lydiard: base aeróbica\n- Daniels: zonas de FC\n\nREGLA CRÍTICA — PLAN SEMANAL:\n- Si hay PLAN GUARDADO en el contexto, SIEMPRE respétalo\n- NO inventes sesiones nuevas\n- Sigue el orden exacto: Sesión 1 → 2 → 3\n- Cuando pregunten qué toca, responde con la SIGUIENTE SESIÓN PENDIENTE exacta\n- Solo modifica si hay fatiga alta o lesión reportada\n\nREGLAS:\n- Máximo 150 palabras por respuesta\n- Da números reales (distancias, %FC, tiempos)\n- Cita autores brevemente cuando sea relevante\n- Usa 🥊 para puntos clave, ⚠️ para alertas\n\nPROHIBIDO: inventar referencias, cambiar plan sin razón, respuestas genéricas, decir 'depende de tu nivel'."
+            },
+            {
+              "type": "HumanMessagePromptTemplate",
+              "message": "={{ $json.chatInput }}"
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        11712,
+        4000
+      ],
+      "id": "db1d1261-7495-49df-a19f-c07fc1ecac41",
+      "name": "Basic LLM Chain1"
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "1d8b8d41-62a4-40f4-ab67-2c608fe64b8d",
+      "name": "Telegram Trigger1",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        10800,
+        4000
+      ],
+      "webhookId": "YOUR_TELEGRAM_WEBHOOK_ID",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT s.fecha, s.distancia_km, s.pace, s.pace_sec_km, s.fc_media, s.trimp, s.intensidad_pct, s.zona, s.round_like, s.session_type FROM boxing_sessions s ORDER BY s.fecha DESC LIMIT 20",
+        "options": {}
+      },
+      "id": "4ab48ae8-8a14-4129-a3f5-dcc0143ba70d",
+      "name": "PG — Historial para Chat1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11024,
+        4000
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM boxing_plan ORDER BY created_at DESC LIMIT 1",
+        "options": {}
+      },
+      "id": "50b5ab9c-e170-47b3-b282-e6d2bab753c6",
+      "name": "PG — Leer Plan Actual1",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        11024,
+        4128
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "postgres_db"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = $('Telegram Trigger1').first().json;\nconst text = msg.message?.text || '';\nconst chatId = msg.message?.chat?.id;\nconst userName = msg.message?.from?.first_name || 'atleta';\n\nconst historialRows = $('PG — Historial para Chat1').all().map(r => r.json);\nconst planRow = $('PG — Leer Plan Actual1').first()?.json || null;\nconst recordsRow = $('PG — Leer Récords').first()?.json || null;\n\nconst now = new Date();\nconst weekMs = 7 * 24 * 60 * 60 * 1000;\n\nconst thisWeek = historialRows.filter(s => (now - new Date(s.fecha)) < weekMs);\nconst lastWeek = historialRows.filter(s => { const d = now - new Date(s.fecha); return d >= weekMs && d < 2*weekMs; });\nconst weeklyLoad = thisWeek.reduce((a,s) => a + (parseInt(s.trimp)||0), 0);\nconst lastWeeklyLoad = lastWeek.reduce((a,s) => a + (parseInt(s.trimp)||0), 0);\nconst hiitThisWeek = thisWeek.filter(s => (parseInt(s.intensidad_pct)||0) >= 85).length;\nconst kmThisWeek = thisWeek.reduce((a,s) => a + (parseFloat(s.distancia_km)||0), 0).toFixed(1);\nconst lastSession = historialRows[0] || null;\n\nconst bestPaceSec = recordsRow?.best_pace_sec || 0;\nconst bestPaceStr = bestPaceSec ? `${Math.floor(bestPaceSec/60)}:${String(Math.round(bestPaceSec%60)).padStart(2,'0')} min/km` : 'Sin datos';\n\nconst t = text.toLowerCase();\nlet intencion = 'general';\nif (t.includes('qué me toca') || t.includes('hoy qué') || t.includes('toca hoy') || t.includes('qué corro') || t.includes('plan') || t.includes('siguiente')) intencion = 'plan_hoy';\nelse if (t.includes('cansado') || t.includes('fatigado') || t.includes('pesado') || t.includes('agotado')) intencion = 'fatiga';\nelse if (t.includes('mejorando') || t.includes('progreso') || t.includes('cómo voy')) intencion = 'progreso';\nelse if (t.includes('round') || t.includes('aguantar') || t.includes('sparring')) intencion = 'rounds';\nelse if (t.includes('récord') || t.includes('record')) intencion = 'records';\nelse if (t.includes('nutrici') || t.includes('comer')) intencion = 'nutricion';\nelse if (t.includes('historial') || t.includes('cuántas sesiones')) intencion = 'historial';\n\nconst last3Trimp = historialRows.slice(0,3).reduce((a,s) => a + (parseInt(s.trimp)||0), 0);\nlet fatigaEstado = 'controlada';\nif (last3Trimp > 270) fatigaEstado = 'alta';\nelse if (last3Trimp > 180) fatigaEstado = 'moderada';\n\nconst tendLoad = weeklyLoad > lastWeeklyLoad ? 'SUBIENDO' : weeklyLoad < lastWeeklyLoad ? 'BAJANDO' : 'ESTABLE';\n\nlet planContexto = 'Sin plan semanal guardado. El próximo domingo Claude generará el plan de la semana.';\nif (planRow && planRow.sesiones) {\n  let sesiones = planRow.sesiones;\n  if (typeof sesiones === 'string') sesiones = JSON.parse(sesiones);\n  const sesionActual = parseInt(planRow.sesion_actual) || 0;\n  const completadas = sesiones.filter(s => s.completado).length;\n  const total = sesiones.length;\n  const siguiente = sesiones.find((s, i) => i >= sesionActual && !s.completado);\n  const planCompletado = sesiones.every(s => s.completado);\n\n  planContexto = `PLAN SEMANAL GENERADO POR IA (${new Date(planRow.generado_el).toLocaleDateString('es-MX')}):\n${sesiones.map((s, i) => `  ${s.completado ? '✅' : i === sesionActual ? '▶️' : '⏳'} ${s.dia} — ${s.tipo}: ${s.descripcion}`).join('\\n')}\n\nProgreso: ${completadas}/${total} sesiones\n${planCompletado ? 'PLAN COMPLETADO esta semana.' : siguiente ? `SIGUIENTE SESIÓN PENDIENTE → ${siguiente.dia} — ${siguiente.tipo}: ${siguiente.descripcion}` : 'Sin sesiones pendientes.'}\n\nINSTRUCCIÓN CRÍTICA: Si preguntan qué les toca, responde EXACTAMENTE con la sesión pendiente del plan. No cambies ni improvises.`;\n}\n\nconst historialTexto = historialRows.slice(0,10).map(s => {\n  const f = new Date(s.fecha).toLocaleDateString('es-MX');\n  return `• ${f}: ${s.distancia_km}km | ${s.pace} | ${s.zona} | TRIMP:${s.trimp} | ${s.round_like ? 'ROUNDS✓' : 'continuo'}`;\n}).join('\\n') || 'Sin historial.';\n\nconst contextoAtleta = `DATOS DEL ATLETA:\n- Nombre: ${userName} | Edad: [EDAD] años | Altura: [ESTATURA]cm | Deporte: [DEPORTE]\n- Running: 3x/semana | Total sesiones en DB: ${historialRows.length}\n\nESTADO ACTUAL:\n- Carga semanal TRIMP: ${weeklyLoad} (tendencia: ${tendLoad})\n- Km esta semana: ${kmThisWeek}km | Sesiones intensas: ${hiitThisWeek}\n- Fatiga: ${fatigaEstado}\n- Última sesión: ${lastSession ? `${new Date(lastSession.fecha).toLocaleDateString('es-MX')} — ${lastSession.distancia_km}km, ${lastSession.pace}, ${lastSession.zona}, TRIMP:${lastSession.trimp}` : 'Sin sesiones'}\n\nRÉCORDS PERMANENTES:\n- Mejor pace: ${bestPaceStr}\n- Mayor TRIMP: ${recordsRow?.max_trimp || 'Sin datos'}\n- Mayor intensidad: ${recordsRow?.max_intensidad ? recordsRow.max_intensidad + '%FC' : 'Sin datos'}\n\nHISTORIAL:\n${historialTexto}\n\n${planContexto}\n\nINTENCIÓN: ${intencion}\nMENSAJE: ${text}`;\n\nreturn [{ json: { chatId, chatInput: contextoAtleta, userText: text, intencion } }];"
+      },
+      "id": "ad1cddb5-29b1-4a0d-9acf-19955697672f",
+      "name": "Preparar Contexto Coach1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11472,
+        4000
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{$json.text}}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "121571fb-369d-4d27-96cf-0656cc0107a6",
+      "name": "Telegram Responder Coach1",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        12208,
+        4000
+      ],
+      "webhookId": "your-webhook-id-5",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst text = input.text || input.output || input.content || JSON.stringify(input);\nreturn [{ json: { text } }];"
+      },
+      "id": "2548ac06-7fc2-4f6a-b114-5807bd17a276",
+      "name": "Formatear Respuesta Coach1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11984,
+        4000
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 3,
+        "unit": "minutes"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        11008,
+        4432
+      ],
+      "id": "2d9d57b7-5c1e-4c22-9dbd-68f4b7797726",
+      "name": "Wait",
+      "webhookId": "your-webhook-id-6"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "GET Actividades Strava",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Actividades Strava": {
+      "main": [
+        [
+          {
+            "node": "Calcular Métricas Import",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular Métricas Import": {
+      "main": [
+        [
+          {
+            "node": "PG — Insertar Sesiones",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Insertar Sesiones": {
+      "main": [
+        [
+          {
+            "node": "PG — Actualizar Récords1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Actualizar Récords1": {
+      "main": [
+        [
+          {
+            "node": "PG — Verificar Total",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Verificar Total": {
+      "main": [
+        [
+          {
+            "node": "Resumen Importación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resumen Importación": {
+      "main": [
+        [
+          {
+            "node": "Telegram — Confirmar Importación1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron Resumen Semanal": {
+      "main": [
+        [
+          {
+            "node": "PG — Leer Historial Completo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Leer Historial Completo": {
+      "main": [
+        [
+          {
+            "node": "Preparar Datos Resumen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Datos Resumen": {
+      "main": [
+        [
+          {
+            "node": "Claude — Generar Plan Semanal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude — Generar Plan Semanal": {
+      "main": [
+        [
+          {
+            "node": "Procesar Plan Claude",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Procesar Plan Claude": {
+      "main": [
+        [
+          {
+            "node": "PG — Guardar Plan IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Guardar Plan IA": {
+      "main": [
+        [
+          {
+            "node": "Telegram Resumen Semanal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Leer Récords": {
+      "main": [
+        [
+          {
+            "node": "Preparar Contexto Coach1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Strava Trigger": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Activity Detail": {
+      "main": [
+        [
+          {
+            "node": "Calcular Métricas Boxeo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular Métricas Boxeo": {
+      "main": [
+        [
+          {
+            "node": "PG — Guardar Sesión",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Guardar Sesión": {
+      "main": [
+        [
+          {
+            "node": "PG — Actualizar Récords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Actualizar Récords": {
+      "main": [
+        [
+          {
+            "node": "PG — Leer Plan Post-Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Leer Plan Post-Run": {
+      "main": [
+        [
+          {
+            "node": "Coach Feedback Post-Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coach Feedback Post-Run": {
+      "main": [
+        [
+          {
+            "node": "Telegram Post-Actividad",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PG — Actualizar Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain1": {
+      "main": [
+        [
+          {
+            "node": "Formatear Respuesta Coach1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger1": {
+      "main": [
+        [
+          {
+            "node": "PG — Historial para Chat1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Historial para Chat1": {
+      "main": [
+        [
+          {
+            "node": "PG — Leer Plan Actual1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG — Leer Plan Actual1": {
+      "main": [
+        [
+          {
+            "node": "PG — Leer Récords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Contexto Coach1": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatear Respuesta Coach1": {
+      "main": [
+        [
+          {
+            "node": "Telegram Responder Coach1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "GET Activity Detail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "c82d04c7-794d-443a-9858-b28317452fcf",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "YOUR_INSTANCE_ID"
+  },
+  "id": "YOUR_WORKFLOW_ID",
+  "tags": [
+    {
+      "updatedAt": "2026-04-23T15:27:40.289Z",
+      "createdAt": "2026-04-23T15:27:40.289Z",
+      "id": "QgcokB428aHMN2Y7",
+      "name": "strava"
+    },
+    {
+      "updatedAt": "2026-04-23T15:27:40.287Z",
+      "createdAt": "2026-04-23T15:27:40.287Z",
+      "id": "FkTCEJDcagUycMoF",
+      "name": "telegram"
+    },
+    {
+      "updatedAt": "2026-04-23T15:27:40.287Z",
+      "createdAt": "2026-04-23T15:27:40.287Z",
+      "id": "LV1N2dDAV1JM7dQV",
+      "name": "boxeo"
+    },
+    {
+      "updatedAt": "2026-04-23T15:27:40.267Z",
+      "createdAt": "2026-04-23T15:27:40.267Z",
+      "id": "HtfM5T9C6mOeJVev",
+      "name": "ia"
+    }
+  ]
+}

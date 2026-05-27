@@ -1,0 +1,6 @@
+.env
+docker-compose.yml
+*.backup
+*.log
+node_modules/
+.DS_Store
